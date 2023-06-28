@@ -26,17 +26,9 @@
 
 #pragma once
 
-#include <filesystem>
 #include <memory>
-#include <cstddef>
-#include <string_view>
-#include <optional>
-#include <utility>
-#include <variant>
-#include <vector>
 
-#include "fastgltf_types.hpp"
-#include "fastgltf_util.hpp"
+#include "types.hpp"
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -53,7 +45,7 @@ namespace simdjson::dom {
     class array;
     class object;
     class parser;
-}
+} // namespace simdjson::dom
 
 namespace fastgltf {
     struct BinaryGltfChunk;
@@ -246,9 +238,8 @@ namespace fastgltf {
         static auto getMimeTypeFromString(std::string_view mime) -> MimeType;
         static void fillCategories(Category& inputCategories) noexcept;
 
-        [[nodiscard]] auto decodeDataUri(URI& uri) const noexcept -> std::pair<Error, DataSource>;
-        [[nodiscard]] auto loadFileFromUri(URI& uri) const noexcept -> std::pair<Error, DataSource>;
-        [[gnu::always_inline]] inline Error parseTextureObject(void* object, std::string_view key, TextureInfo* info) noexcept;
+        [[nodiscard]] auto decodeDataUri(URIView& uri) const noexcept -> std::pair<Error, DataSource>;
+        [[nodiscard]] auto loadFileFromUri(URIView& uri) const noexcept -> std::pair<Error, DataSource>;
 
         void parseAccessors(simdjson::dom::array& array);
         void parseAnimations(simdjson::dom::array& array);
@@ -347,7 +338,7 @@ namespace fastgltf {
          * Loads the file with a optional byte offset into a memory buffer.
          */
         bool loadFromFile(const std::filesystem::path& path, std::uint64_t byteOffset = 0) noexcept;
-        
+
         /**
          * Returns the size, in bytes,
          * @return
@@ -451,7 +442,7 @@ namespace fastgltf {
         void setBase64DecodeCallback(Base64DecodeCallback* decodeCallback) noexcept;
         void setUserPointer(void* pointer) noexcept;
     };
-}
+} // namespace fastgltf
 
 #ifdef _MSC_VER
 #pragma warning(pop)

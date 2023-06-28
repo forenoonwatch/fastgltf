@@ -45,17 +45,17 @@
 #pragma warning(disable : 4514) // unreferenced inline function has been removed
 #endif
 
-#include "simdjson.h"
+#include <simdjson.h>
 
 #ifdef SIMDJSON_TARGET_VERSION
 // Make sure that SIMDJSON_TARGET_VERSION is equal to SIMDJSON_VERSION.
 static_assert(std::string_view { SIMDJSON_TARGET_VERSION } == SIMDJSON_VERSION, "Outdated version of simdjson. Reconfigure project to update.");
 #endif
 
-#include "fastgltf_parser.hpp"
-#include "fastgltf_types.hpp"
-#include "fastgltf_util.hpp"
-#include "base64_decode.hpp"
+#include <fastgltf/parser.hpp>
+#include <fastgltf/types.hpp>
+#include <fastgltf/util.hpp>
+#include <fastgltf/base64.hpp>
 
 #if defined(__x86_64__) || defined(_M_AMD64) || defined(_M_IX86)
 #include <smmintrin.h>
@@ -166,254 +166,395 @@ namespace fastgltf {
 #endif
     }
 
-    [[nodiscard, gnu::always_inline]] inline std::tuple<bool, bool, std::size_t> getImageIndexForExtension(simdjson::dom::object& object, std::string_view extension);
-    [[nodiscard, gnu::always_inline]] inline bool parseTextureExtensions(Texture& texture, simdjson::dom::object& extensions, Extensions extensionFlags);
+	[[nodiscard, gnu::always_inline]] inline std::tuple<bool, bool, std::size_t> getImageIndexForExtension(simdjson::dom::object& object, std::string_view extension) {
+		using namespace simdjson;
 
-    [[nodiscard, gnu::always_inline]] inline Error getJsonArray(simdjson::dom::object& parent, std::string_view arrayName, simdjson::dom::array* array) noexcept;
+		dom::object sourceExtensionObject;
+		if (object[extension].get_object().get(sourceExtensionObject) != SUCCESS) {
+			return std::make_tuple(false, true, 0U);
+		}
+
+		std::uint64_t imageIndex;
+		if (sourceExtensionObject["source"].get_uint64().get(imageIndex) != SUCCESS) {
+			return std::make_tuple(true, false, 0U);
+		}
+
+		return std::make_tuple(false, false, imageIndex);
+	}
+
+	[[nodiscard, gnu::always_inline]] inline bool parseTextureExtensions(Texture& texture, simdjson::dom::object& extensions, Extensions extensionFlags) {
+		if (hasBit(extensionFlags, Extensions::KHR_texture_basisu)) {
+			auto [invalidGltf, extensionNotPresent, imageIndex] = getImageIndexForExtension(extensions, extensions::KHR_texture_basisu);
+			if (invalidGltf) {
+				return false;
+			}
+
+			if (!extensionNotPresent) {
+				texture.imageIndex = imageIndex;
+				return true;
+			}
+		}
+
+		if (hasBit(extensionFlags, Extensions::MSFT_texture_dds)) {
+			auto [invalidGltf, extensionNotPresent, imageIndex] = getImageIndexForExtension(extensions, extensions::MSFT_texture_dds);
+			if (invalidGltf) {
+				return false;
+			}
+
+			if (!extensionNotPresent) {
+				texture.imageIndex = imageIndex;
+				return true;
+			}
+		}
+
+		if (hasBit(extensionFlags, Extensions::EXT_texture_webp)) {
+			auto [invalidGltf, extensionNotPresent, imageIndex] = getImageIndexForExtension(extensions, extensions::EXT_texture_webp);
+			if (invalidGltf) {
+				return false;
+			}
+
+			if (!extensionNotPresent) {
+				texture.imageIndex = imageIndex;
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	[[nodiscard, gnu::always_inline]] inline Error getJsonArray(simdjson::dom::object& parent, std::string_view arrayName, simdjson::dom::array* array) noexcept {
+		using namespace simdjson;
+
+		auto error = parent[arrayName].get_array().get(*array);
+		if (error == NO_SUCH_FIELD) {
+			return Error::MissingField;
+		}
+		if (error == SUCCESS) {
+			return Error::None;
+		}
+		return Error::InvalidJson;
+	}
+
+	fg::Error parseTextureObject(simdjson::dom::object& object, std::string_view key, TextureInfo* info, Extensions extensions) noexcept {
+		using namespace simdjson;
+
+		dom::object child;
+		const auto childErr = object[key].get_object().get(child);
+		if (childErr == NO_SUCH_FIELD) {
+			return Error::MissingField; // Don't set errorCode.
+		} else if (childErr != SUCCESS) {
+			return Error::InvalidGltf;
+		}
+
+		std::uint64_t index;
+		if (child["index"].get_uint64().get(index) == SUCCESS) {
+			info->textureIndex = static_cast<std::size_t>(index);
+		} else {
+			return Error::InvalidGltf;
+		}
+
+		if (child["texCoord"].get_uint64().get(index) == SUCCESS) {
+			info->texCoordIndex = static_cast<std::size_t>(index);
+		} else {
+			info->texCoordIndex = 0;
+		}
+
+		// scale only applies to normal textures.
+		double scale = 1.0F;
+		if (child["scale"].get_double().get(scale) == SUCCESS) {
+			info->scale = static_cast<float>(scale);
+		} else {
+			info->scale = 1.0F;
+		}
+
+		dom::object extensionsObject;
+		if (child["extensions"].get_object().get(extensionsObject) == SUCCESS) {
+			dom::object textureTransform;
+			if (hasBit(extensions, Extensions::KHR_texture_transform) && extensionsObject[extensions::KHR_texture_transform].get_object().get(textureTransform) == SUCCESS) {
+				auto transform = std::make_unique<TextureTransform>();
+				transform->rotation = 0.0F;
+				transform->uvOffset = {{ 0.0F, 0.0F }};
+				transform->uvScale = {{ 1.0F, 1.0F }};
+
+				if (textureTransform["texCoord"].get_uint64().get(index) == SUCCESS) {
+					transform->texCoordIndex = index;
+				}
+
+				double rotation = 0.0F;
+				if (textureTransform["rotation"].get_double().get(rotation) == SUCCESS) {
+					transform->rotation = static_cast<float>(rotation);
+				}
+
+				dom::array array;
+				if (textureTransform["offset"].get_array().get(array) == SUCCESS) {
+					for (auto i = 0U; i < 2; ++i) {
+						double val;
+						if (array.at(i).get_double().get(val) != SUCCESS) {
+							return Error::InvalidGltf;
+						}
+						transform->uvOffset[i] = static_cast<float>(val);
+					}
+				}
+
+				if (textureTransform["scale"].get_array().get(array) == SUCCESS) {
+					for (auto i = 0U; i < 2; ++i) {
+						double val;
+						if (array.at(i).get_double().get(val) != SUCCESS) {
+							return Error::InvalidGltf;
+						}
+						transform->uvScale[i] = static_cast<float>(val);
+					}
+				}
+
+				info->transform = std::move(transform);
+			}
+		}
+
+		return Error::None;
+	}
 } // namespace fastgltf
 
-std::tuple<bool, bool, std::size_t> fg::getImageIndexForExtension(simdjson::dom::object& object, std::string_view extension) {
-    using namespace simdjson;
-
-    dom::object sourceExtensionObject;
-    if (object[extension].get_object().get(sourceExtensionObject) != SUCCESS) {
-        return std::make_tuple(false, true, 0U);
-    }
-
-    std::uint64_t imageIndex;
-    if (sourceExtensionObject["source"].get_uint64().get(imageIndex) != SUCCESS) {
-        return std::make_tuple(true, false, 0U);
-    }
-
-    return std::make_tuple(false, false, imageIndex);
-}
-
-fg::Error fg::getJsonArray(simdjson::dom::object& parent, std::string_view arrayName, simdjson::dom::array* array) noexcept {
-    using namespace simdjson;
-
-    auto error = parent[arrayName].get_array().get(*array);
-    if (error == NO_SUCH_FIELD) {
-        return Error::MissingField;
-    }
-    if (error == SUCCESS) {
-        return Error::None;
-    }
-    return Error::InvalidJson;
-}
-
-bool fg::parseTextureExtensions(Texture& texture, simdjson::dom::object& extensions, Extensions extensionFlags) {
-    if (hasBit(extensionFlags, Extensions::KHR_texture_basisu)) {
-        auto [invalidGltf, extensionNotPresent, imageIndex] = getImageIndexForExtension(extensions, extensions::KHR_texture_basisu);
-        if (invalidGltf) {
-            return false;
-        }
-
-        if (!extensionNotPresent) {
-            texture.imageIndex = imageIndex;
-            return true;
-        }
-    }
-
-    if (hasBit(extensionFlags, Extensions::MSFT_texture_dds)) {
-        auto [invalidGltf, extensionNotPresent, imageIndex] = getImageIndexForExtension(extensions, extensions::MSFT_texture_dds);
-        if (invalidGltf) {
-            return false;
-        }
-
-        if (!extensionNotPresent) {
-            texture.imageIndex = imageIndex;
-            return true;
-        }
-    }
-
-    if (hasBit(extensionFlags, Extensions::EXT_texture_webp)) {
-        auto [invalidGltf, extensionNotPresent, imageIndex] = getImageIndexForExtension(extensions, extensions::EXT_texture_webp);
-        if (invalidGltf) {
-            return false;
-        }
-
-        if (!extensionNotPresent) {
-            texture.imageIndex = imageIndex;
-            return true;
-        }
-    }
-
-    return false;
-}
-
 #pragma region URI
+fg::URIView::URIView() noexcept = default;
+
+fg::URIView::URIView(std::string_view uri) noexcept : view(uri) {
+	parse();
+}
+
+fg::URIView::URIView(const URIView& other) noexcept {
+	*this = other;
+}
+
+fg::URIView& fg::URIView::operator=(const URIView& other) {
+	view = other.view;
+	_scheme = other._scheme;
+	_path = other._path;
+	_userinfo = other._userinfo;
+	_host = other._host;
+	_port = other._port;
+	_query = other._query;
+	_fragment = other._fragment;
+	return *this;
+}
+
+fg::URIView& fg::URIView::operator=(std::string_view other) {
+	view = other;
+	parse();
+	return *this;
+}
+
+void fg::URIView::parse() {
+	if (view.empty()) {
+		_valid = false;
+		return;
+	}
+
+	size_t idx = 0;
+	auto firstColon = view.find(':');
+	if (firstColon != std::string::npos) {
+		// URI has a scheme.
+		if (firstColon == 0) {
+			// Empty scheme is invalid
+			_valid = false;
+			return;
+		}
+		_scheme = view.substr(0, firstColon);
+		idx = firstColon + 1;
+	}
+
+	if (startsWith(view.substr(idx), "//")) {
+		// URI has an authority part.
+		idx += 2;
+		auto nextSlash = view.find('/', idx);
+		auto userInfo = view.find('@', idx);
+		if (userInfo != std::string::npos && userInfo < nextSlash) {
+			_userinfo = view.substr(idx, userInfo - idx);
+			idx += _userinfo.size() + 1;
+		}
+
+		auto hostEnd = nextSlash - 1;
+		std::size_t portColon;
+		if (view[idx] == '[') {
+			hostEnd = view.find(']', idx);
+			if (hostEnd == std::string::npos) {
+				_valid = false;
+				return;
+			}
+			// IPv6 addresses are made up of colons, so we need to search after its address.
+			// This will just be hostEnd + 1 or std::string::npos.
+			portColon = view.find(':', hostEnd);
+		} else {
+			portColon = view.find(':', idx);
+		}
+
+		if (portColon != std::string::npos) {
+			_host = view.substr(idx, portColon - idx);
+			++portColon; // We don't want to include the colon in the port string.
+			_port = view.substr(portColon, nextSlash - portColon);
+		} else {
+			++idx;
+			_host = view.substr(idx, hostEnd - idx);
+		}
+
+		idx = nextSlash; // Path includes this slash
+	}
+
+	// Parse the path.
+	auto questionIdx = view.find("?", idx);
+	auto hashIdx = view.find("#", idx);
+	if (questionIdx != std::string::npos) {
+		_path = view.substr(idx, questionIdx - idx);
+
+		if (hashIdx == std::string::npos) {
+			_query = view.substr(++questionIdx);
+		} else {
+			++questionIdx;
+			_query = view.substr(questionIdx, hashIdx - questionIdx);
+			_fragment = view.substr(++hashIdx);
+		}
+	} else if (hashIdx != std::string::npos) {
+		_path = view.substr(idx, hashIdx - idx);
+		_fragment = view.substr(++hashIdx);
+	} else {
+		_path = view.substr(idx);
+	}
+}
+
+const char* fg::URIView::data() const noexcept {
+	return view.data();
+}
+
+std::string_view fg::URIView::string() const noexcept { return view; }
+std::string_view fg::URIView::scheme() const noexcept { return _scheme; }
+std::string_view fg::URIView::userinfo() const noexcept { return _userinfo; }
+std::string_view fg::URIView::host() const noexcept { return _host; }
+std::string_view fg::URIView::port() const noexcept { return _port; }
+std::string_view fg::URIView::path() const noexcept { return _path; }
+std::string_view fg::URIView::query() const noexcept { return _query; }
+std::string_view fg::URIView::fragment() const noexcept { return _fragment; }
+
+fs::path fg::URIView::fspath() const {
+	if (!isLocalPath())
+		return {};
+	return { path() };
+}
+
+bool fg::URIView::valid() const noexcept {
+	return _valid;
+}
+
+bool fg::URIView::isLocalPath() const noexcept {
+	return scheme().empty() || (scheme() == "file" && host().empty());
+}
+
+bool fg::URIView::isDataUri() const noexcept {
+	return scheme() == "data";
+}
+
 fg::URI::URI() noexcept = default;
 
 fg::URI::URI(std::string uri) noexcept : uri(std::move(uri)) {
-    parse();
+	decodePercents(this->uri);
+	view = this->uri; // Also parses.
 }
 
 fg::URI::URI(std::string_view uri) noexcept : uri(uri) {
-    parse();
+	decodePercents(this->uri);
+	view = this->uri; // Also parses.
 }
 
 // Some C++ stdlib implementations copy in some cases when moving strings, which invalidates the
 // views stored in the URI struct. This function adjusts the views from the old string to the new
 // string for safe copying.
-fg::URI::URI(const URI& other) : uri(other.uri) {
-    *this = other;
+fg::URI::URI(const URI& other) {
+	*this = other;
 }
 
 fg::URI::URI(URI&& other) noexcept {
-    *this = other;
+	*this = other;
 }
 
 fg::URI& fg::URI::operator=(const URI& other) {
-    uri = other.uri;
-    readjustViews(other, other.uri);
-    return *this;
+	uri = other.uri;
+	// We'll assume that with copying the string will always have to reallocate.
+	readjustViews(other.view);
+	return *this;
+}
+
+fg::URI& fg::URI::operator=(const URIView& other) {
+	uri = other.view;
+	readjustViews(other);
+	return *this;
 }
 
 fg::URI& fg::URI::operator=(URI&& other) noexcept {
-    std::string_view view = other.uri;
-    uri = std::move(other.uri);
-    _valid = other._valid;
-    other._valid = false;
-    if (uri.data() == view.data()) {
-        _scheme = other._scheme;
-        _path = other._path;
-        _userinfo = other._userinfo;
-        _host = other._host;
-        _port = other._port;
-        _query = other._query;
-        _fragment = other._fragment;
-    } else {
-        // A reallocation happened or stack memory was used.
-        readjustViews(other, view);
-    }
-    return *this;
+	auto* oldData = other.uri.data();
+	uri = std::move(other.uri);
+
+	// Invalidate the previous URI's view.
+	view._valid = other.view._valid;
+	other.view._valid = false;
+
+	if (uri.data() != oldData) {
+		// Allocation changed, we need to readjust views
+		readjustViews(other.view);
+	} else {
+		// No reallocation happened, we can safely copy the view.
+		view = other.view;
+	}
+	return *this;
 }
 
-void fg::URI::readjustViews(const fastgltf::URI& other, std::string_view otherUri) {
-    if (!other._scheme.empty()) {   _scheme     = std::string_view(uri.data() + (other._scheme.data()     - other.uri.data()), other._scheme.size()); }
-    if (!other._path.empty()) {     _path       = std::string_view(uri.data() + (other._path.data()       - other.uri.data()), other._path.size()); }
-    if (!other._userinfo.empty()) { _userinfo   = std::string_view(uri.data() + (other._userinfo.data()   - other.uri.data()), other._userinfo.size()); }
-    if (!other._host.empty()) {     _host       = std::string_view(uri.data() + (other._host.data()       - other.uri.data()), other._host.size()); }
-    if (!other._port.empty()) {     _port       = std::string_view(uri.data() + (other._port.data()       - other.uri.data()), other._port.size()); }
-    if (!other._query.empty()) {    _query      = std::string_view(uri.data() + (other._query.data()      - other.uri.data()), other._query.size()); }
-    if (!other._fragment.empty()) { _fragment   = std::string_view(uri.data() + (other._fragment.data()   - other.uri.data()), other._fragment.size()); }
+fg::URI::operator fg::URIView() const noexcept {
+	return view;
+}
+
+void fg::URI::readjustViews(const URIView& other) {
+	if (!other._scheme.empty())   { view._scheme     = std::string_view(uri.data() + (other._scheme.data()     - other.view.data()), other._scheme.size()); }
+	if (!other._path.empty())     { view._path       = std::string_view(uri.data() + (other._path.data()       - other.view.data()), other._path.size()); }
+	if (!other._userinfo.empty()) { view._userinfo   = std::string_view(uri.data() + (other._userinfo.data()   - other.view.data()), other._userinfo.size()); }
+	if (!other._host.empty())     { view._host       = std::string_view(uri.data() + (other._host.data()       - other.view.data()), other._host.size()); }
+	if (!other._port.empty())     { view._port       = std::string_view(uri.data() + (other._port.data()       - other.view.data()), other._port.size()); }
+	if (!other._query.empty())    { view._query      = std::string_view(uri.data() + (other._query.data()      - other.view.data()), other._query.size()); }
+	if (!other._fragment.empty()) { view._fragment   = std::string_view(uri.data() + (other._fragment.data()   - other.view.data()), other._fragment.size()); }
+
+	view.view = uri;
 }
 
 void fg::URI::decodePercents(std::string& x) noexcept {
-    for (auto it = x.begin(); it != x.end(); it++) {
-        if (*it == '%') {
-            // Read the next two chars and store them.
-            std::array<char, 3> chars = {*(it + 1), *(it + 2), 0};
-            *it = static_cast<char>(std::strtoul(chars.data(), nullptr, 16));
-            x.erase(it + 1, it + 3);
-        }
-    }
+	for (auto it = x.begin(); it != x.end(); ++it) {
+		if (*it == '%') {
+			// Read the next two chars and store them.
+			std::array<char, 3> chars = {*(it + 1), *(it + 2), 0};
+			*it = static_cast<char>(std::strtoul(chars.data(), nullptr, 16));
+			x.erase(it + 1, it + 3);
+		}
+	}
 }
 
-void fg::URI::parse() {
-    if (uri.empty()) {
-        _valid = false;
-        return;
-    }
-
-    auto uriView = std::string_view { uri };
-
-    size_t idx = 0;
-    auto firstColon = uri.find(':');
-    if (firstColon != std::string::npos) {
-        // URI has a scheme.
-        if (firstColon == 0) {
-            // Empty scheme is invalid
-            _valid = false;
-            return;
-        }
-        _scheme = uriView.substr(0, firstColon);
-        idx = firstColon + 1;
-    }
-
-    if (startsWith(uriView.substr(idx), "//")) {
-        // URI has an authority part.
-        idx += 2;
-        auto nextSlash = uriView.find('/', idx);
-        auto userInfo = uriView.find('@', idx);
-        if (userInfo != std::string::npos && userInfo < nextSlash) {
-            _userinfo = uriView.substr(idx, userInfo - idx);
-            idx += _userinfo.size() + 1;
-        }
-
-        auto hostEnd = nextSlash - 1;
-        std::size_t portColon;
-        if (uriView[idx] == '[') {
-            hostEnd = uriView.find(']', idx);
-            if (hostEnd == std::string::npos) {
-                _valid = false;
-                return;
-            }
-            // IPv6 addresses are made up of colons, so we need to search after its address.
-            // This will just be hostEnd + 1 or std::string::npos.
-            portColon = uriView.find(':', hostEnd);
-        } else {
-            portColon = uriView.find(':', idx);
-        }
-
-        if (portColon != std::string::npos) {
-            _host = uriView.substr(idx, portColon - idx);
-            ++portColon; // We don't want to include the colon in the port string.
-            _port = uriView.substr(portColon, nextSlash - portColon);
-        } else {
-            ++idx;
-            _host = uriView.substr(idx, hostEnd - idx);
-        }
-
-        idx = nextSlash; // Path includes this slash
-    }
-
-    // Parse the path.
-    auto questionIdx = uriView.find("?", idx);
-    auto hashIdx = uriView.find("#", idx);
-    if (questionIdx != std::string::npos) {
-        _path = uriView.substr(idx, questionIdx - idx);
-
-        if (hashIdx == std::string::npos) {
-            _query = uriView.substr(++questionIdx);
-        } else {
-            ++questionIdx;
-            _query = uriView.substr(questionIdx, hashIdx - questionIdx);
-            _fragment = uriView.substr(++hashIdx);
-        }
-    } else if (hashIdx != std::string::npos) {
-        _path = uriView.substr(idx, hashIdx - idx);
-        _fragment = uriView.substr(++hashIdx);
-    } else {
-        _path = uriView.substr(idx);
-    }
-}
-
-std::string_view fg::URI::raw() const noexcept { return uri; }
-std::string_view fg::URI::scheme() const noexcept { return _scheme; }
-std::string_view fg::URI::userinfo() const noexcept { return _userinfo; }
-std::string_view fg::URI::host() const noexcept { return _host; }
-std::string_view fg::URI::port() const noexcept { return _port; }
-std::string_view fg::URI::path() const noexcept { return _path; }
-std::string_view fg::URI::query() const noexcept { return _query; }
-std::string_view fg::URI::fragment() const noexcept { return _fragment; }
+std::string_view fg::URI::string() const noexcept { return uri; }
+std::string_view fg::URI::scheme() const noexcept { return view.scheme(); }
+std::string_view fg::URI::userinfo() const noexcept { return view.userinfo(); }
+std::string_view fg::URI::host() const noexcept { return view.host(); }
+std::string_view fg::URI::port() const noexcept { return view.port(); }
+std::string_view fg::URI::path() const noexcept { return view.path(); }
+std::string_view fg::URI::query() const noexcept { return view.query(); }
+std::string_view fg::URI::fragment() const noexcept { return view.fragment(); }
 
 fs::path fg::URI::fspath() const {
-    if (!isLocalPath())
-        return {};
-    return { path() };
+	return view.fspath();
 }
 
 bool fg::URI::valid() const noexcept {
-    return _valid;
+	return view.valid();
 }
 
 bool fg::URI::isLocalPath() const noexcept {
-    return scheme().empty() || (scheme() == "file" && host().empty());
+	return view.isLocalPath();
 }
 
 bool fg::URI::isDataUri() const noexcept {
-    return scheme() == "data";
+	return view.isDataUri();
 }
 #pragma endregion
 
@@ -455,7 +596,7 @@ static constexpr std::array<std::pair<std::string_view, fastgltf::Extensions>, 1
 #define SET_ERROR_RETURN_ERROR(error) errorCode = error; \
     return errorCode;
 
-std::pair<fg::Error, fg::DataSource> fg::glTF::decodeDataUri(URI& uri) const noexcept {
+std::pair<fg::Error, fg::DataSource> fg::glTF::decodeDataUri(URIView& uri) const noexcept {
     auto path = uri.path();
     auto mimeEnd = path.find(';');
     auto mime = path.substr(0, mimeEnd);
@@ -506,7 +647,7 @@ std::pair<fg::Error, fg::DataSource> fg::glTF::decodeDataUri(URI& uri) const noe
     return std::make_pair(Error::None, std::move(source));
 }
 
-std::pair<fg::Error, fg::DataSource> fg::glTF::loadFileFromUri(URI& uri) const noexcept {
+std::pair<fg::Error, fg::DataSource> fg::glTF::loadFileFromUri(URIView& uri) const noexcept {
     auto path = directory / uri.path();
     std::error_code error;
     // If we were instructed to load external buffers and the files don't exist, we'll return an error.
@@ -815,7 +956,13 @@ fg::Error fg::glTF::validate() {
                         accessor.componentType != ComponentType::UnsignedShort) {
                         return Error::InvalidGltf;
                     }
-                }
+                } else if (startsWith(name, "_")) {
+					// Application-specific attribute semantics MUST start with an underscore, e.g., _TEMPERATURE.
+					// Application-specific attribute semantics MUST NOT use unsigned int component type.
+					if (accessor.componentType == ComponentType::UnsignedInt) {
+						return Error::InvalidGltf;
+					}
+				}
             }
         }
     }
@@ -838,10 +985,10 @@ fg::Error fg::glTF::validate() {
             // "When the node contains skin, all mesh.primitives MUST contain JOINTS_0 and WEIGHTS_0 attributes."
             auto& mesh = parsedAsset->meshes[node.meshIndex.value()];
             for (auto& primitive : mesh.primitives) {
-                auto end = primitive.attributes.end();
-                if (primitive.attributes.find("JOINTS_0") == end || primitive.attributes.find("WEIGHTS_0") == end) {
-                    return Error::InvalidGltf;
-                }
+				auto joints0 = primitive.findAttribute("JOINTS_0");
+				auto weights0 = primitive.findAttribute("WEIGHTS_0");
+				if (joints0 == primitive.attributes.end() || weights0 == primitive.attributes.end())
+					return Error::InvalidGltf;
             }
         }
     }
@@ -1023,26 +1170,24 @@ void fg::glTF::parseAccessors(simdjson::dom::array& accessors) {
         std::uint64_t componentType;
         if (accessorObject["componentType"].get_uint64().get(componentType) != SUCCESS) {
             SET_ERROR_RETURN(Error::InvalidGltf)
-        } else {
-            accessor.componentType = getComponentType(static_cast<std::underlying_type_t<ComponentType>>(componentType));
-            if (accessor.componentType == ComponentType::Double && !hasBit(options, Options::AllowDouble)) {
-                SET_ERROR_RETURN(Error::InvalidGltf)
-            }
+        }
+		accessor.componentType = getComponentType(static_cast<std::underlying_type_t<ComponentType>>(componentType));
+        if (accessor.componentType == ComponentType::Double && !hasBit(options, Options::AllowDouble)) {
+            SET_ERROR_RETURN(Error::InvalidGltf)
         }
 
         std::string_view accessorType;
         if (accessorObject["type"].get_string().get(accessorType) != SUCCESS) {
             SET_ERROR_RETURN(Error::InvalidGltf)
-        } else {
-            accessor.type = getAccessorType(accessorType);
         }
+		accessor.type = getAccessorType(accessorType);
 
         std::uint64_t accessorCount;
         if (accessorObject["count"].get_uint64().get(accessorCount) != SUCCESS) {
             SET_ERROR_RETURN(Error::InvalidGltf)
-        } else {
-            accessor.count = static_cast<std::size_t>(accessorCount);
         }
+		accessor.count = static_cast<std::size_t>(accessorCount);
+
 
         std::uint64_t bufferView;
         if (accessorObject["bufferView"].get_uint64().get(bufferView) == SUCCESS) {
@@ -1144,6 +1289,11 @@ void fg::glTF::parseAccessors(simdjson::dom::array& accessors) {
             accessor.normalized = false;
         }
 
+		// This property MUST NOT be set to true for accessors with FLOAT or UNSIGNED_INT component type.
+		if (accessor.normalized && (accessor.componentType == ComponentType::UnsignedInt || accessor.componentType == ComponentType::Float)) {
+			SET_ERROR_RETURN(Error::InvalidGltf)
+		}
+
         dom::object sparseAccessorObject;
         if (accessorObject["sparse"].get_object().get(sparseAccessorObject) == SUCCESS) {
             SparseAccessor sparse = {};
@@ -1162,12 +1312,12 @@ void fg::glTF::parseAccessors(simdjson::dom::array& accessors) {
             if (child["bufferView"].get_uint64().get(value) != SUCCESS) {
                 SET_ERROR_RETURN(Error::InvalidGltf)
             }
-            sparse.bufferViewIndices = static_cast<std::size_t>(value);
+            sparse.indicesBufferView = static_cast<std::size_t>(value);
 
             if (child["byteOffset"].get_uint64().get(value) != SUCCESS) {
-                sparse.byteOffsetIndices = 0;
+                sparse.indicesByteOffset = 0;
             } else {
-                sparse.byteOffsetIndices = static_cast<std::size_t>(value);
+                sparse.indicesByteOffset = static_cast<std::size_t>(value);
             }
 
             if (child["componentType"].get_uint64().get(value) != SUCCESS) {
@@ -1183,12 +1333,12 @@ void fg::glTF::parseAccessors(simdjson::dom::array& accessors) {
             if (child["bufferView"].get_uint64().get(value) != SUCCESS) {
                 SET_ERROR_RETURN(Error::InvalidGltf)
             }
-            sparse.bufferViewValues = static_cast<std::size_t>(value);
+            sparse.valuesBufferView = static_cast<std::size_t>(value);
 
             if (child["byteOffset"].get_uint64().get(value) != SUCCESS) {
-                sparse.byteOffsetValues = 0;
+                sparse.valuesByteOffset = 0;
             } else {
-                sparse.byteOffsetValues = static_cast<std::size_t>(value);
+                sparse.valuesByteOffset = static_cast<std::size_t>(value);
             }
 
             accessor.sparse = sparse;
@@ -1345,20 +1495,21 @@ void fg::glTF::parseBuffers(simdjson::dom::array& buffers) {
         // file. Otherwise, data must be specified in the "uri" field.
         std::string_view uriString;
         if (bufferObject["uri"].get_string().get(uriString) == SUCCESS) {
-            URI uri(uriString);
-            if (!uri.valid()) {
+			URIView uriView(uriString);
+
+            if (!uriView.valid()) {
                 SET_ERROR_RETURN(Error::InvalidURI)
             }
 
-            if (uri.isDataUri()) {
-                auto [error, source] = decodeDataUri(uri);
+            if (uriView.isDataUri()) {
+                auto [error, source] = decodeDataUri(uriView);
                 if (error != Error::None) {
                     SET_ERROR_RETURN(error)
                 }
 
                 buffer.data = std::move(source);
-            } else if (uri.isLocalPath() && hasBit(options, Options::LoadExternalBuffers)) {
-                auto [error, source] = loadFileFromUri(uri);
+            } else if (uriView.isLocalPath() && hasBit(options, Options::LoadExternalBuffers)) {
+                auto [error, source] = loadFileFromUri(uriView);
                 if (error != Error::None) {
                     SET_ERROR_RETURN(error)
                 }
@@ -1367,7 +1518,7 @@ void fg::glTF::parseBuffers(simdjson::dom::array& buffers) {
             } else {
                 sources::URI filePath;
                 filePath.fileByteOffset = 0;
-                filePath.uri = std::move(uri);
+                filePath.uri = uriView;
                 buffer.data = std::move(filePath);
             }
         } else if (bufferIndex == 0 && !std::holds_alternative<std::monostate>(glbBuffer)) {
@@ -1670,20 +1821,20 @@ void fg::glTF::parseImages(simdjson::dom::array& images) {
                 SET_ERROR_RETURN(Error::InvalidGltf)
             }
 
-            URI uri(uriString);
-            if (!uri.valid()) {
+            URIView uriView(uriString);
+            if (!uriView.valid()) {
                 SET_ERROR_RETURN(Error::InvalidURI)
             }
 
-            if (uri.isDataUri()) {
-                auto [error, source] = decodeDataUri(uri);
+            if (uriView.isDataUri()) {
+                auto [error, source] = decodeDataUri(uriView);
                 if (error != Error::None) {
                     SET_ERROR_RETURN(error)
                 }
 
                 image.data = std::move(source);
-            } else if (uri.isLocalPath() && hasBit(options, Options::LoadExternalImages)) {
-                auto [error, source] = loadFileFromUri(uri);
+            } else if (uriView.isLocalPath() && hasBit(options, Options::LoadExternalImages)) {
+                auto [error, source] = loadFileFromUri(uriView);
                 if (error != Error::None) {
                     SET_ERROR_RETURN(error)
                 }
@@ -1692,7 +1843,7 @@ void fg::glTF::parseImages(simdjson::dom::array& images) {
             } else {
                 sources::URI filePath;
                 filePath.fileByteOffset = 0;
-                filePath.uri = std::move(uri);
+                filePath.uri = uriView;
                 image.data = std::move(filePath);
             }
 
@@ -1854,19 +2005,19 @@ void fg::glTF::parseMaterials(simdjson::dom::array& materials) {
         }
 
         TextureInfo textureObject = {};
-        if (auto error = parseTextureObject(&materialObject, "normalTexture", &textureObject); error == Error::None) {
+        if (auto error = parseTextureObject(materialObject, "normalTexture", &textureObject, data->config.extensions); error == Error::None) {
             material.normalTexture = std::move(textureObject);
         } else if (error != Error::MissingField) {
             SET_ERROR_RETURN(error)
         }
 
-        if (auto error = parseTextureObject(&materialObject, "occlusionTexture", &textureObject); error == Error::None) {
+        if (auto error = parseTextureObject(materialObject, "occlusionTexture", &textureObject, data->config.extensions); error == Error::None) {
             material.occlusionTexture = std::move(textureObject);
         } else if (error != Error::MissingField) {
             SET_ERROR_RETURN(error)
         }
 
-        if (auto error = parseTextureObject(&materialObject, "emissiveTexture", &textureObject); error == Error::None) {
+        if (auto error = parseTextureObject(materialObject, "emissiveTexture", &textureObject, data->config.extensions); error == Error::None) {
             material.emissiveTexture = std::move(textureObject);
         } else if (error != Error::MissingField) {
             SET_ERROR_RETURN(error)
@@ -1901,13 +2052,13 @@ void fg::glTF::parseMaterials(simdjson::dom::array& materials) {
                 pbr.roughnessFactor = 1.0F;
             }
 
-            if (auto error = parseTextureObject(&pbrMetallicRoughness, "baseColorTexture", &textureObject); error == Error::None) {
+            if (auto error = parseTextureObject(pbrMetallicRoughness, "baseColorTexture", &textureObject, data->config.extensions); error == Error::None) {
                 pbr.baseColorTexture = std::move(textureObject);
             } else if (error != Error::MissingField) {
                 SET_ERROR_RETURN(error)
             }
 
-            if (auto error = parseTextureObject(&pbrMetallicRoughness, "metallicRoughnessTexture", &textureObject); error == Error::None) {
+            if (auto error = parseTextureObject(pbrMetallicRoughness, "metallicRoughnessTexture", &textureObject, data->config.extensions); error == Error::None) {
                 pbr.metallicRoughnessTexture = std::move(textureObject);
             } else if (error != Error::MissingField) {
                 SET_ERROR_RETURN(error)
@@ -1969,7 +2120,7 @@ void fg::glTF::parseMaterials(simdjson::dom::array& materials) {
                     }
 
                     TextureInfo clearcoatTexture;
-                    if (auto error = parseTextureObject(&clearcoatObject, "clearcoatTexture", &clearcoatTexture); error == Error::None) {
+                    if (auto error = parseTextureObject(clearcoatObject, "clearcoatTexture", &clearcoatTexture, data->config.extensions); error == Error::None) {
                         clearcoat->clearcoatTexture = std::move(clearcoatTexture);
                     } else if (error != Error::MissingField) {
                         SET_ERROR_RETURN(error)
@@ -1985,14 +2136,14 @@ void fg::glTF::parseMaterials(simdjson::dom::array& materials) {
                     }
 
                     TextureInfo clearcoatRoughnessTexture;
-                    if (auto error = parseTextureObject(&clearcoatObject, "clearcoatRoughnessTexture", &clearcoatRoughnessTexture); error == Error::None) {
+                    if (auto error = parseTextureObject(clearcoatObject, "clearcoatRoughnessTexture", &clearcoatRoughnessTexture, data->config.extensions); error == Error::None) {
                         clearcoat->clearcoatRoughnessTexture = std::move(clearcoatRoughnessTexture);
                     } else if (error != Error::MissingField) {
                         SET_ERROR_RETURN(error)
                     }
 
                     TextureInfo clearcoatNormalTexture;
-                    if (auto error = parseTextureObject(&clearcoatObject, "clearcoatNormalTexture", &clearcoatNormalTexture); error == Error::None) {
+                    if (auto error = parseTextureObject(clearcoatObject, "clearcoatNormalTexture", &clearcoatNormalTexture, data->config.extensions); error == Error::None) {
                         clearcoat->clearcoatNormalTexture = std::move(clearcoatNormalTexture);
                     } else if (error != Error::MissingField) {
                         SET_ERROR_RETURN(error)
@@ -2054,7 +2205,7 @@ void fg::glTF::parseMaterials(simdjson::dom::array& materials) {
                     }
 
                     TextureInfo iridescenceTexture;
-                    if (auto error = parseTextureObject(&iridescenceObject, "specularTexture", &iridescenceTexture); error == Error::None) {
+                    if (auto error = parseTextureObject(iridescenceObject, "specularTexture", &iridescenceTexture, data->config.extensions); error == Error::None) {
                         iridescence->iridescenceTexture = std::move(iridescenceTexture);
                     } else if (error != Error::MissingField) {
                         SET_ERROR_RETURN(error)
@@ -2088,7 +2239,7 @@ void fg::glTF::parseMaterials(simdjson::dom::array& materials) {
                     }
 
                     TextureInfo iridescenceThicknessTexture;
-                    if (auto error = parseTextureObject(&iridescenceObject, "specularTexture", &iridescenceThicknessTexture); error == Error::None) {
+                    if (auto error = parseTextureObject(iridescenceObject, "specularTexture", &iridescenceThicknessTexture, data->config.extensions); error == Error::None) {
                         iridescence->iridescenceThicknessTexture = std::move(iridescenceThicknessTexture);
                     } else if (error != Error::MissingField) {
                         SET_ERROR_RETURN(error)
@@ -2126,7 +2277,7 @@ void fg::glTF::parseMaterials(simdjson::dom::array& materials) {
                     }
 
                     TextureInfo sheenColorTexture;
-                    if (auto error = parseTextureObject(&sheenObject, "sheenColorTexture", &sheenColorTexture); error == Error::None) {
+                    if (auto error = parseTextureObject(sheenObject, "sheenColorTexture", &sheenColorTexture, data->config.extensions); error == Error::None) {
                         sheen->sheenColorTexture = std::move(sheenColorTexture);
                     } else if (error != Error::MissingField) {
                         SET_ERROR_RETURN(error)
@@ -2142,7 +2293,7 @@ void fg::glTF::parseMaterials(simdjson::dom::array& materials) {
                     }
 
                     TextureInfo sheenRoughnessTexture;
-                    if (auto error = parseTextureObject(&sheenObject, "sheenRoughnessTexture", &sheenRoughnessTexture); error == Error::None) {
+                    if (auto error = parseTextureObject(sheenObject, "sheenRoughnessTexture", &sheenRoughnessTexture, data->config.extensions); error == Error::None) {
                         sheen->sheenRoughnessTexture = std::move(sheenRoughnessTexture);
                     } else if (error != Error::MissingField) {
                         SET_ERROR_RETURN(error)
@@ -2170,7 +2321,7 @@ void fg::glTF::parseMaterials(simdjson::dom::array& materials) {
                     }
 
                     TextureInfo specularTexture;
-                    if (auto error = parseTextureObject(&specularObject, "specularTexture", &specularTexture); error == Error::None) {
+                    if (auto error = parseTextureObject(specularObject, "specularTexture", &specularTexture, data->config.extensions); error == Error::None) {
                         specular->specularTexture = std::move(specularTexture);
                     } else if (error != Error::MissingField) {
                         SET_ERROR_RETURN(error)
@@ -2196,7 +2347,7 @@ void fg::glTF::parseMaterials(simdjson::dom::array& materials) {
                     }
 
                     TextureInfo specularColorTexture;
-                    if (auto error = parseTextureObject(&specularObject, "specularColorTexture", &specularColorTexture); error == Error::None) {
+                    if (auto error = parseTextureObject(specularObject, "specularColorTexture", &specularColorTexture, data->config.extensions); error == Error::None) {
                         specular->specularColorTexture = std::move(specularColorTexture);
                     } else if (error != Error::MissingField) {
                         SET_ERROR_RETURN(error)
@@ -2224,7 +2375,7 @@ void fg::glTF::parseMaterials(simdjson::dom::array& materials) {
                     }
 
                     TextureInfo transmissionTexture;
-                    if (auto error = parseTextureObject(&transmissionObject, "transmissionTexture", &transmissionTexture); error == Error::None) {
+                    if (auto error = parseTextureObject(transmissionObject, "transmissionTexture", &transmissionTexture, data->config.extensions); error == Error::None) {
                         transmission->transmissionTexture = std::move(transmissionTexture);
                     } else if (error != Error::MissingField) {
                         SET_ERROR_RETURN(error)
@@ -2262,7 +2413,7 @@ void fg::glTF::parseMaterials(simdjson::dom::array& materials) {
                     }
 
                     TextureInfo thicknessTexture;
-                    if (auto error = parseTextureObject(&volumeObject, "thicknessTexture", &thicknessTexture); error == Error::None) {
+                    if (auto error = parseTextureObject(volumeObject, "thicknessTexture", &thicknessTexture, data->config.extensions); error == Error::None) {
                         volume->thicknessTexture = std::move(thicknessTexture);
                     } else if (error != Error::MissingField) {
                         SET_ERROR_RETURN(error)
@@ -2337,7 +2488,7 @@ void fg::glTF::parseMeshes(simdjson::dom::array& meshes) {
                     SET_ERROR_RETURN(Error::InvalidGltf)
                 }
 
-                auto parseAttributes = [](dom::object& object, std::unordered_map<std::string, std::size_t>& map) -> auto {
+                auto parseAttributes = [](dom::object& object, decltype(primitive.attributes)& attributes) -> auto {
                     // We iterate through the JSON object and write each key/pair value into the
                     // attributes map. The keys are only validated in the validate() method.
                     for (const auto& field : object) {
@@ -2347,7 +2498,8 @@ void fg::glTF::parseMeshes(simdjson::dom::array& meshes) {
                         if (field.value.get_uint64().get(attributeIndex) != SUCCESS) {
                             return Error::InvalidGltf;
                         }
-                        map[std::string { key }] = static_cast<std::size_t>(attributeIndex);
+						attributes.emplace_back(
+							std::make_pair(std::string { key }, static_cast<std::size_t>(attributeIndex)));
                     }
                     return Error::None;
                 };
@@ -2673,85 +2825,6 @@ void fg::glTF::parseSkins(simdjson::dom::array& skins) {
     }
 }
 
-fg::Error fg::glTF::parseTextureObject(void* object, std::string_view key, TextureInfo* info) noexcept {
-    using namespace simdjson;
-    auto& obj = *static_cast<dom::object*>(object);
-
-    dom::object child;
-    const auto childErr = obj[key].get_object().get(child);
-    if (childErr == NO_SUCH_FIELD) {
-        return Error::MissingField; // Don't set errorCode.
-    } else if (childErr != SUCCESS) {
-        SET_ERROR_RETURN_ERROR(Error::InvalidGltf)
-    }
-
-    std::uint64_t index;
-    if (child["index"].get_uint64().get(index) == SUCCESS) {
-        info->textureIndex = static_cast<std::size_t>(index);
-    } else {
-        SET_ERROR_RETURN_ERROR(Error::InvalidGltf)
-    }
-
-    if (child["texCoord"].get_uint64().get(index) == SUCCESS) {
-        info->texCoordIndex = static_cast<std::size_t>(index);
-    } else {
-        info->texCoordIndex = 0;
-    }
-
-    // scale only applies to normal textures.
-    double scale = 1.0F;
-    if (child["scale"].get_double().get(scale) == SUCCESS) {
-        info->scale = static_cast<float>(scale);
-    } else {
-        info->scale = 1.0F;
-    }
-
-    dom::object extensionsObject;
-    if (child["extensions"].get_object().get(extensionsObject) == SUCCESS) {
-        dom::object textureTransform;
-        if (hasBit(data->config.extensions, Extensions::KHR_texture_transform) && extensionsObject[extensions::KHR_texture_transform].get_object().get(textureTransform) == SUCCESS) {
-            auto transform = std::make_unique<TextureTransform>();
-            transform->rotation = 0.0F;
-            transform->uvOffset = {{ 0.0F, 0.0F }};
-            transform->uvScale = {{ 1.0F, 1.0F }};
-
-            if (textureTransform["texCoord"].get_uint64().get(index) == SUCCESS) {
-                transform->texCoordIndex = index;
-            }
-
-            double rotation = 0.0F;
-            if (textureTransform["rotation"].get_double().get(rotation) == SUCCESS) {
-                transform->rotation = static_cast<float>(rotation);
-            }
-
-            dom::array array;
-            if (textureTransform["offset"].get_array().get(array) == SUCCESS) {
-                for (auto i = 0U; i < 2; ++i) {
-                    double val;
-                    if (array.at(i).get_double().get(val) != SUCCESS) {
-                        return Error::InvalidGltf;
-                    }
-                    transform->uvOffset[i] = static_cast<float>(val);
-                }
-            }
-
-            if (textureTransform["scale"].get_array().get(array) == SUCCESS) {
-                for (auto i = 0U; i < 2; ++i) {
-                    double val;
-                    if (array.at(i).get_double().get(val) != SUCCESS) {
-                        return Error::InvalidGltf;
-                    }
-                    transform->uvScale[i] = static_cast<float>(val);
-                }
-            }
-
-            info->transform = std::move(transform);
-        }
-    }
-
-    return Error::None;
-}
-
 void fg::glTF::parseTextures(simdjson::dom::array& textures) {
     using namespace simdjson;
 
@@ -2995,7 +3068,7 @@ std::unique_ptr<fg::glTF> fg::Parser::loadGLTF(GltfDataBuffer* buffer, fs::path 
 
     auto data = std::make_unique<ParserData>();
     auto view = padded_string_view(reinterpret_cast<const std::uint8_t*>(buffer->bufferPointer), jsonLength, buffer->allocatedSize);
-    if (jsonParser->parse(view).get(data->root) != SUCCESS) {
+    if (auto error = jsonParser->parse(view).get(data->root); error != SUCCESS) {
         errorCode = Error::InvalidJson;
         return nullptr;
     }

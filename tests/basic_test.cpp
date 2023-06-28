@@ -10,9 +10,9 @@
 #include <glm/gtx/quaternion.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
 
-#include "base64_decode.hpp"
-#include "fastgltf_parser.hpp"
-#include "fastgltf_types.hpp"
+#include <fastgltf/base64.hpp>
+#include <fastgltf/parser.hpp>
+#include <fastgltf/types.hpp>
 #include "gltf_path.hpp"
 
 TEST_CASE("Component type tests", "[gltf-loader]") {
@@ -494,10 +494,10 @@ TEST_CASE("Validate sparse accessor parsing", "[gltf-loader]") {
     REQUIRE(asset->accessors[1].sparse.has_value());
     auto& sparse = asset->accessors[1].sparse.value();
     REQUIRE(sparse.count == 3);
-    REQUIRE(sparse.bufferViewIndices == 2);
-    REQUIRE(sparse.byteOffsetIndices == 0);
-    REQUIRE(sparse.bufferViewValues == 3);
-    REQUIRE(sparse.byteOffsetValues == 0);
+    REQUIRE(sparse.indicesBufferView == 2);
+    REQUIRE(sparse.indicesByteOffset == 0);
+    REQUIRE(sparse.valuesBufferView == 3);
+    REQUIRE(sparse.valuesByteOffset == 0);
     REQUIRE(sparse.indexComponentType == fastgltf::ComponentType::UnsignedShort);
 }
 
@@ -519,14 +519,20 @@ TEST_CASE("Validate morph target parsing", "[gltf-loader]") {
     REQUIRE(asset->meshes.front().primitives.size() == 1);
 
     auto& primitive = asset->meshes.front().primitives.front();
-    REQUIRE(primitive.attributes.find("POSITION") != primitive.attributes.end());
-    REQUIRE(primitive.attributes["POSITION"] == 1);
+
+	auto position = primitive.findAttribute("POSITION");
+	REQUIRE(position != primitive.attributes.end());
+	REQUIRE((*position).second == 1);
 
     REQUIRE(primitive.targets.size() == 2);
-    REQUIRE(primitive.targets[0].find("POSITION") != primitive.targets[0].end());
-    REQUIRE(primitive.targets[0]["POSITION"] == 2);
-    REQUIRE(primitive.targets[1].find("POSITION") != primitive.targets[1].end());
-    REQUIRE(primitive.targets[1]["POSITION"] == 3);
+
+	auto positionTarget0 = primitive.findTargetAttribute(0, "POSITION");
+    REQUIRE(positionTarget0 != primitive.targets[0].end());
+    REQUIRE((*positionTarget0).second == 2);
+
+	auto positionTarget1 = primitive.findTargetAttribute(1, "POSITION");
+    REQUIRE(positionTarget0 != primitive.targets[1].end());
+    REQUIRE((*positionTarget1).second == 3);
 }
 
 TEST_CASE("Test accessors min/max", "[gltf-loader]") {

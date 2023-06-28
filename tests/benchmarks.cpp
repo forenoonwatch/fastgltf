@@ -5,7 +5,7 @@
 
 #include "simdjson.h"
 
-#include "fastgltf_parser.hpp"
+#include <fastgltf/parser.hpp>
 #include "gltf_path.hpp"
 
 constexpr auto benchmarkOptions = fastgltf::Options::DontRequireValidAssetMember;
@@ -63,6 +63,11 @@ void setTinyGLTFCallbacks(tinygltf::TinyGLTF& gltf) {
 #include <cgltf.h>
 #endif
 
+#ifdef HAS_GLTFRS
+#include "rust/cxx.h"
+#include "gltf-rs-bridge/lib.h"
+#endif
+
 std::vector<uint8_t> readFileAsBytes(std::filesystem::path path) {
     std::ifstream file(path, std::ios::ate | std::ios::binary);
     if (!file.is_open())
@@ -106,7 +111,6 @@ TEST_CASE("Benchmark loading of NewSponza", "[gltf-benchmark]") {
 #endif
 
 #ifdef HAS_CGLTF
-    auto filePath = (path / "NewSponza_Main_glTF_002.gltf").string();
     BENCHMARK("Parse NewSponza with cgltf") {
         cgltf_options options = {};
         cgltf_data* data = nullptr;
@@ -115,6 +119,14 @@ TEST_CASE("Benchmark loading of NewSponza", "[gltf-benchmark]") {
         cgltf_free(data);
         return result;
     };
+#endif
+
+#ifdef HAS_GLTFRS
+	auto padding = fastgltf::getGltfBufferPadding();
+	BENCHMARK("Parse NewSponza with gltf-rs") {
+		auto slice = rust::Slice<const std::uint8_t>(reinterpret_cast<std::uint8_t*>(bytes.data()), bytes.size() - padding);
+		return rust::gltf::run(slice);
+	};
 #endif
 }
 
@@ -155,6 +167,14 @@ TEST_CASE("Benchmark base64 decoding from glTF file", "[gltf-benchmark]") {
         return result;
     };
 #endif
+
+#ifdef HAS_GLTFRS
+	auto padding = fastgltf::getGltfBufferPadding();
+	BENCHMARK("2CylinderEngine with gltf-rs") {
+		auto slice = rust::Slice<const std::uint8_t>(reinterpret_cast<std::uint8_t*>(bytes.data()), bytes.size() - padding);
+		return rust::gltf::run(slice);
+	};
+#endif
 }
 
 TEST_CASE("Benchmark raw JSON parsing", "[gltf-benchmark]") {
@@ -192,6 +212,14 @@ TEST_CASE("Benchmark raw JSON parsing", "[gltf-benchmark]") {
         cgltf_free(data);
         return result;
     };
+#endif
+
+#ifdef HAS_GLTFRS
+	auto padding = fastgltf::getGltfBufferPadding();
+	BENCHMARK("Parse Buggy.gltf with gltf-rs") {
+		auto slice = rust::Slice<const std::uint8_t>(reinterpret_cast<std::uint8_t*>(bytes.data()), bytes.size() - padding);
+		return rust::gltf::run(slice);
+	};
 #endif
 }
 
@@ -235,6 +263,14 @@ TEST_CASE("Benchmark massive gltf file", "[gltf-benchmark]") {
         return result;
     };
 #endif
+
+#ifdef HAS_GLTFRS
+	auto padding = fastgltf::getGltfBufferPadding();
+	BENCHMARK("Parse Bistro with gltf-rs") {
+		auto slice = rust::Slice<const std::uint8_t>(reinterpret_cast<std::uint8_t*>(bytes.data()), bytes.size() - padding);
+		return rust::gltf::run(slice);
+	};
+#endif
 }
 
 TEST_CASE("Compare parsing performance with minified documents", "[gltf-benchmark]") {
@@ -274,7 +310,7 @@ TEST_CASE("Compare parsing performance with minified documents", "[gltf-benchmar
     };
 }
 
-#if defined(__x86_64__) || defined(_M_AMD64) || defined(_M_IX86)
+#if defined(FASTGLTF_IS_X86)
 TEST_CASE("Small CRC32-C benchmark", "[gltf-benchmark]") {
     static constexpr std::string_view test = "abcdefghijklmnopqrstuvwxyz";
     BENCHMARK("Default 1-byte tabular algorithm") {

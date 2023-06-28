@@ -36,9 +36,8 @@ endif()
 # stb
 if(EXISTS "${FASTGLTF_DEPS_DIR}/stb")
     message(STATUS "fastgltf: Found stb")
-    add_library(stb)
-    target_include_directories(stb PUBLIC "${FASTGLTF_DEPS_DIR}/stb")
-    target_sources(stb PUBLIC "${FASTGLTF_DEPS_DIR}/stb/stb_vorbis.c")
+    add_library(stb INTERFACE)
+    target_include_directories(stb INTERFACE "${FASTGLTF_DEPS_DIR}/stb")
 endif()
 
 # Catch2
@@ -65,4 +64,10 @@ if (EXISTS "${FASTGLTF_DEPS_DIR}/glad")
 
     # Let the glad script generate the glad headers
     glad_add_library(fg_glad_gl46 REPRODUCIBLE EXCLUDE_FROM_ALL LOADER API gl:core=4.6)
+endif()
+
+# corrosion
+if (FASTGLTF_ENABLE_GLTF_RS AND EXISTS "${FASTGLTF_DEPS_DIR}/corrosion")
+    message(STATUS "fastgltf: Found corrosion")
+    add_subdirectory(${FASTGLTF_DEPS_DIR}/corrosion)
 endif()

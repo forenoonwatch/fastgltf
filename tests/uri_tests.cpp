@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include <fastgltf_types.hpp>
+#include <fastgltf/types.hpp>
+#include <fastgltf/parser.hpp>
 
 TEST_CASE("Test basic URIs", "[uri-tests]") {
     const fastgltf::URI uri1(std::string_view(""));
@@ -85,7 +86,7 @@ TEST_CASE("Validate URI copying/moving", "[uri-tests]") {
         fastgltf::URI uri(data);
         REQUIRE(uri.path() == data);
         fastgltf::URI uri2(uri);
-        REQUIRE(uri2.raw().data() != uri.raw().data());
+        REQUIRE(uri2.string().data() != uri.string().data());
         REQUIRE(uri2.path() == data);
     }
 
@@ -94,10 +95,30 @@ TEST_CASE("Validate URI copying/moving", "[uri-tests]") {
         {
             fastgltf::URI uri2(data);
             uri = std::move(uri2);
-            REQUIRE(uri2.raw().empty());
+            REQUIRE(uri2.string().empty());
         }
         // Test that the values were copied over and that the string views are still valid.
-        REQUIRE(uri.raw() == data);
-        REQUIRE(uri.path() == uri.raw());
+        REQUIRE(uri.string() == data);
+        REQUIRE(uri.path() == uri.string());
     }
+}
+
+TEST_CASE("Validate escaped/percent-encoded URI", "[uri-tests]") {
+	const std::string_view gltfString = R"({"images": [{"uri": "grande_sph\u00E8re.png"}]})";
+	fastgltf::GltfDataBuffer dataBuffer;
+	dataBuffer.copyBytes((uint8_t*) gltfString.data(), gltfString.size());
+
+	fastgltf::Parser parser;
+	auto gltf = parser.loadGLTF(&dataBuffer, "", fastgltf::Options::DontRequireValidAssetMember);
+	REQUIRE(parser.getError() == fastgltf::Error::None);
+	auto result = gltf->parse();
+	REQUIRE(result == fastgltf::Error::None);
+
+	auto asset = gltf->getParsedAsset();
+	auto escaped = std::get<fastgltf::sources::URI>(asset->images.front().data);
+
+	const fastgltf::URI original(std::string_view("grande_sphère.png"));
+	const fastgltf::URI encoded(std::string_view("grande_sph%C3%A8re.png"));
+	REQUIRE(original.string() == escaped.uri.string());
+	REQUIRE(original.string() == encoded.string());
 }

@@ -28,6 +28,8 @@
 
 #include <array>
 #include <cmath>
+#include <limits>
+#include <string_view>
 #include <type_traits>
 
 // Macros to determine C++ standard version
@@ -105,7 +107,7 @@ namespace fastgltf {
         { t > t } -> std::same_as<bool>;
     }
 #endif
-    [[nodiscard]] inline T max(T a, T b) noexcept {
+    [[nodiscard]] constexpr T max(T a, T b) noexcept {
         return (a > b) ? a : b;
     }
 
@@ -238,7 +240,7 @@ namespace fastgltf {
         // optimise this away, like instead use the bsr x86 instruction.
         if (value == 0) return 64;
         std::uint8_t count = 0;
-        for (int i = std::numeric_limits<T>::digits; i > 0; --i) {
+        for (auto i = std::numeric_limits<T>::digits - 1; i > 0; --i) {
             if ((value >> i) == 1) {
                 return count;
             }
