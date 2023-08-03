@@ -234,7 +234,7 @@ namespace fastgltf {
     [[gnu::const]] inline std::uint8_t clz(T value) {
         static_assert(std::is_integral_v<T>);
 #if FASTGLTF_HAS_BIT
-        return std::countl_zero(value);
+        return static_cast<std::uint8_t>(std::countl_zero(value));
 #else
         // Very naive but working implementation of counting zero bits. Any sane compiler will
         // optimise this away, like instead use the bsr x86 instruction.
@@ -249,6 +249,22 @@ namespace fastgltf {
         return count;
 #endif
     }
+
+	template <typename T>
+	[[gnu::const]] inline std::uint8_t popcount(T value) {
+		static_assert(std::is_integral_v<T>);
+#if FASTGLTF_HAS_BIT
+		return static_cast<std::uint8_t>(std::popcount(value));
+#else
+		std::uint8_t bits = 0;
+		while (value) {
+			if (value & 1)
+				++bits;
+			value >>= 1;
+		}
+		return bits;
+#endif
+	}
 
     /**
      * Essentially the same as std::same<T, U> but it accepts multiple different types for U,
